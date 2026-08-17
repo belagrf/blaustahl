@@ -681,7 +681,7 @@ static void cli_handle_pw_new2(const char *input) {
 	if (strcmp(input, pw_first) != 0) {
 		printf("PASSWORD MISMATCH, CANCELLED.");
 	} else if (pw_new_is_rotation) {
-		printf("DERIVING KEY (PBKDF2, ~1S)...\r\n");
+		printf("DERIVING KEY (PBKDF2, ~10S)...\r\n");
 		fflush(stdout);
 		if (storage_crypt_change_password(input)) {
 			printf("PASSWORD CHANGED.");
@@ -689,7 +689,7 @@ static void cli_handle_pw_new2(const char *input) {
 			printf("FAILED TO CHANGE PASSWORD.");
 		}
 	} else {
-		printf("DERIVING KEY (PBKDF2, ~1S)...\r\n");
+		printf("DERIVING KEY (PBKDF2, ~10S)...\r\n");
 		fflush(stdout);
 		if (storage_crypt_enable(input)) {
 			printf("FRAM ENCRYPTED AND UNLOCKED.");
@@ -708,7 +708,7 @@ static void cli_handle_pw_unlock(const char *input) {
 
 	uint8_t algo_before = storage_crypt_algo();
 
-	printf("DERIVING KEY...\r\n");
+	printf("DERIVING KEY (PBKDF2, ~10S)...\r\n");
 	fflush(stdout);
 
 	if (storage_crypt_unlock(input)) {
@@ -904,9 +904,32 @@ void cli_yield(vt100_event_t ev) {
 
 			if (!handled) {
 #ifdef BLAUSTAHL_APPS_ENABLED
-				// original, untokenized line -- see the file header
-				// comment on why this can't be cmd/arg1/arg2
-				ms_glue_eval_line(line);
+				// refuse to evaluate lines containing non-printable
+				// bytes: real Scheme is always printable ASCII (plus
+				// the '\n' the continuation collector inserts), while
+				// binary line noise -- a desynced XMODEM frame, an
+				// SRWP command landing at the prompt, serial garbage
+				// -- is not code. Feeding such bytes to the evaluator
+				// is how a stray frame once parsed into something the
+				// interpreter chewed on forever, hanging core1 (which
+				// stops all input processing) with only a power cycle
+				// as the way out. Verified on hardware.
+				bool binary = false;
+				for (int i = 0; line[i]; i++) {
+					unsigned char ch = (unsigned char)line[i];
+					if (ch != '\n' && ch != '\t' && (ch < 0x20 || ch > 0x7e)) {
+						binary = true;
+						break;
+					}
+				}
+				if (binary) {
+					printf("INPUT CONTAINS NON-PRINTABLE BYTES -- "
+						"IGNORED (NOT EVALUATED AS SCHEME).");
+				} else {
+					// original, untokenized line -- see the file header
+					// comment on why this can't be cmd/arg1/arg2
+					ms_glue_eval_line(line);
+				}
 #else
 				printf("UNKNOWN COMMAND '%s'. TYPE help FOR A LIST.", cmd);
 #endif

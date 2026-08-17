@@ -52,7 +52,12 @@
 #define MBEDTLS_ECP_DP_CURVE25519_ENABLED
 #define MBEDTLS_KEY_EXCHANGE_RSA_ENABLED
 #define MBEDTLS_PKCS1_V15
-#define MBEDTLS_SHA256_SMALLER
+// MBEDTLS_SHA256_SMALLER deliberately NOT defined: the size-optimized
+// SHA-256 is ~3x slower on the M0+, and PBKDF2 runs 100k HMAC
+// iterations of it at every unlock -- measured ~34s per key
+// derivation with SMALLER, roughly 10s without. Flash is not scarce
+// here (~560KB used of the 2MB application region), unlock latency is
+// the thing users actually feel.
 #define MBEDTLS_SSL_SERVER_NAME_INDICATION
 #define MBEDTLS_AES_C
 #define MBEDTLS_ASN1_PARSE_C
