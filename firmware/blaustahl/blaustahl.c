@@ -210,6 +210,26 @@ bool cdc_putchar_reliable(const char ch) {
 
 }
 
+// Magic-baud recovery, in the spirit of the RP2040/Arduino "1200 baud
+// touch" convention. This callback runs from tud_task() on CORE0 --
+// which means it still works when core1 (the whole application) is
+// wedged: a runaway Scheme evaluation, a stuck blocking transfer,
+// anything. Before this existed, the only way out of a core1 hang was
+// physically unplugging the device (demonstrated on real hardware via
+// a runaway interpreter evaluation; USB stayed enumerated the whole
+// time, since core0 was fine).
+//
+//   stty -F /dev/ttyACMx 1200   -> reboot into the UF2 bootloader
+//   stty -F /dev/ttyACMx 2400   -> plain application reboot
+//
+// Neither rate is otherwise meaningful to a device whose CDC ignores
+// baud entirely, so there's no accidental-trigger surface.
+void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding) {
+	(void)itf;
+	if (coding->bit_rate == 1200) reset_usb_boot(0, 0);
+	if (coding->bit_rate == 2400) watchdog_reboot(0, 0, 100);
+}
+
 // control LED
 void blaustahl_led(uint16_t intensity) {
 	pwm_set_gpio_level(BS_LED, intensity);

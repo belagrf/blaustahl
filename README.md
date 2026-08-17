@@ -25,6 +25,17 @@
 >   escape by pausing briefly.
 > - **`lock` and `reboot` CLI commands.** `lock` drops the session key and
 >   plaintext buffers without unplugging; `reboot` restarts the device.
+> - **Magic-baud recovery.** Setting the serial port to 1200 baud reboots
+>   the device into the UF2 bootloader, 2400 baud reboots the application
+>   -- handled on core0's USB task, so it works even if the application
+>   core is wedged (e.g. by a runaway Scheme evaluation, which previously
+>   required unplugging). `stty -F /dev/ttyACM0 1200`
+> - **Faster unlock.** Dropped mbedtls's size-optimized SHA-256; PBKDF2
+>   key derivation went from ~34s to ~10s per unlock on the RP2040.
+>
+> Known limitation (inherited from upstream): a deliberately infinite
+> Scheme evaluation still hangs the application core until a magic-baud
+> or physical reset; the interpreter has no step budget.
 >
 > Upstream: [machdyne/blaustahl](https://github.com/machdyne/blaustahl).
 > Original README follows.

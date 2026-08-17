@@ -905,15 +905,17 @@ void cli_yield(vt100_event_t ev) {
 			if (!handled) {
 #ifdef BLAUSTAHL_APPS_ENABLED
 				// refuse to evaluate lines containing non-printable
-				// bytes: real Scheme is always printable ASCII (plus
-				// the '\n' the continuation collector inserts), while
-				// binary line noise -- a desynced XMODEM frame, an
-				// SRWP command landing at the prompt, serial garbage
-				// -- is not code. Feeding such bytes to the evaluator
-				// is how a stray frame once parsed into something the
-				// interpreter chewed on forever, hanging core1 (which
-				// stops all input processing) with only a power cycle
-				// as the way out. Verified on hardware.
+				// bytes. Defense-in-depth, not the primary guard: the
+				// keystroke layer already drops non-printables before
+				// they reach this buffer (verified on hardware), so in
+				// practice binary line noise arrives here only as its
+				// printable subset. The real residual risk is that
+				// such a printable-garbage line -- or a deliberately
+				// typed one -- evaluates to something the interpreter
+				// loops on forever, hanging core1. That is inherited
+				// upstream behavior (any infinite Scheme loop does it)
+				// and is now recoverable without unplugging via the
+				// 1200/2400-baud reset in blaustahl.c.
 				bool binary = false;
 				for (int i = 0; line[i]; i++) {
 					unsigned char ch = (unsigned char)line[i];
