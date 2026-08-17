@@ -119,7 +119,16 @@ if(BLAUSTAHL_ENABLE_APPS)
 	# so it's a transient cost only while "scheme" is actually running,
 	# not a permanent reservation. Revisit both numbers once real
 	# hardware free-RAM measurement is available.
-	set(MS_HEAP_CELLS "3000" CACHE STRING "Machdyne Scheme heap size, in cells")
+	# 2000 cells (~48KB), down from the original 3000 (~72KB): the
+	# "revisit once real hardware free-RAM measurement is available"
+	# moment arrived. Measured: .bss is now ~134KB of 264KB, leaving
+	# ~130KB for stacks + heap; with a 72KB Scheme session reallocated
+	# on every CLI entry plus XMODEM's transient 32KB staging buffer,
+	# long interactive sessions fragmented the heap to the point of
+	# malloc failures and (observed twice on hardware) a wedged core1
+	# around heavy-churn moments. 48KB keeps a full standard-library
+	# session working while restoring ~24KB of headroom.
+	set(MS_HEAP_CELLS "2000" CACHE STRING "Machdyne Scheme heap size, in cells")
 	set(MS_PROTECT_STACK_SLOTS "512" CACHE STRING "Machdyne Scheme protect stack size, in slots")
 
 	target_sources(blaustahl PUBLIC
