@@ -15,6 +15,9 @@
 
 #include <string.h>
 
+#include <mbedtls/pkcs5.h>
+#include <mbedtls/md.h>
+
 #include "crypt.h"
 
 int crypt_init(psa_key_id_t *key, const uint8_t *key_bytes) {
@@ -59,6 +62,35 @@ int crypt_kdf(const char *password, const uint8_t *salt, uint8_t *key_out) {
 	memcpy(&pass_salt[32], salt, 16);
 
 	return crypt_hash(pass_salt, sizeof(pass_salt), key_out);
+
+}
+
+int crypt_kdf_pbkdf2(const char *password, const uint8_t *salt,
+		uint32_t iters, uint8_t *key_out) {
+
+	if (!password || !password[0] || iters == 0) return 0;
+
+	// mbedtls 2.28 API (what pico-sdk vendors): caller sets up the
+	// HMAC context, mbedtls_pkcs5_pbkdf2_hmac() then keys it once and
+	// reuses it across all iterations -- unlike hand-rolling per-
+	// iteration psa_mac_compute() calls (whose per-call key import
+	// overhead would roughly triple the runtime for zero security
+	// benefit).
+	const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+	if (!info) return 0;
+
+	mbedtls_md_context_t md;
+	mbedtls_md_init(&md);
+
+	int ret = mbedtls_md_setup(&md, info, 1 /* HMAC */);
+	if (ret == 0)
+		ret = mbedtls_pkcs5_pbkdf2_hmac(&md,
+			(const unsigned char *)password, strlen(password),
+			salt, 16, iters, 32, key_out);
+
+	mbedtls_md_free(&md);
+
+	return ret == 0 ? 1 : 0;
 
 }
 

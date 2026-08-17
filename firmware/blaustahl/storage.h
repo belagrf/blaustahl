@@ -135,16 +135,35 @@ typedef enum {
 
 crypt_status_t storage_crypt_status(void);
 
+// the LTSF algo byte currently on the chip (LTSF_ALGO_* in ltsf.h).
+// Lets the CLI notice a legacy format was auto-upgraded during unlock
+// (algo changes 1 -> 2) and say so.
+uint8_t storage_crypt_algo(void);
+
+// true if boot-time journal recovery replayed an interrupted FRAM
+// rewrite this session -- surfaced in `info` so a user whose commit
+// got torn learns it was healed rather than never knowing.
+bool storage_recovered_this_boot(void);
+
 // enable encryption on currently-plaintext FRAM: generates a new salt,
-// derives a key from `password` (max 32 chars), encrypts the current
-// FRAM content, and commits it. False on failure (already encrypted,
-// or a crypto/write error) -- FRAM is left untouched on failure.
+// derives a key from `password` (PBKDF2-HMAC-SHA256, full password
+// length used), encrypts the current FRAM content, and commits it.
+// False on failure (already encrypted, or a crypto/write error) --
+// FRAM is left untouched on failure.
 bool storage_crypt_enable(const char *password);
 
 // attempt to unlock already-encrypted FRAM with `password`. False if
 // the password is wrong (AEAD tag check fails) or FRAM isn't
-// encrypted at all.
+// encrypted at all. Legacy single-SHA256 formats (algo 1) are
+// transparently re-encrypted under PBKDF2 (algo 2) on successful
+// unlock, using the same password.
 bool storage_crypt_unlock(const char *password);
+
+// drop the session key and every RAM copy of FRAM plaintext, leaving
+// encrypted FRAM locked again (what unplugging achieves, without
+// unplugging). False if not currently unlocked, or if the FRAM buffer
+// holds uncommitted edits (commit first -- lock never discards work).
+bool storage_crypt_lock(void);
 
 // changes the password on already-unlocked, encrypted FRAM: decrypts
 // with the current key, generates a genuinely fresh salt, derives a

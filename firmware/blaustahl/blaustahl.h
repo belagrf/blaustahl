@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define BLAUSTAHL_VERSION "0.1.0"
+#define BLAUSTAHL_VERSION "0.2.0-hardened"
 
 #define FRAM_SIZE 8192		// 8KB
 //#define FRAM_SIZE 262144	// 256KB
@@ -21,8 +21,18 @@
  #define FRAM_BIG
 #endif
 
+#include <stdbool.h>
+
 int cdc_getchar(void);
 void cdc_putchar(const char ch);
+
+// like cdc_putchar() but waits (bounded) for CDC TX FIFO space
+// instead of silently dropping when it's full -- required for any
+// multi-byte payload whose framing can't survive a lost byte (XMODEM
+// blocks, SRWP replies). Previously defined in blaustahl.c but never
+// declared anywhere, so xmodem.c was calling it through an implicit
+// declaration. Returns false if the host stopped reading.
+bool cdc_putchar_reliable(const char ch);
 
 void blaustahl_led(uint16_t intensity);
 void blaustahl_dfu(void);

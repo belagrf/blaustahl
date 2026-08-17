@@ -35,7 +35,24 @@ int crypt_hash(const uint8_t *data, size_t len, uint8_t *out32);
 // fixed-width password field, just derived from a real string instead
 // of requiring the caller to pre-pad a 32-byte buffer themselves).
 // key_out must have room for 32 bytes.
+//
+// LEGACY (LTSF algo 1) -- kept only so existing encrypted FRAM can
+// still be unlocked and then upgraded. A single unsalted-speed SHA-256
+// is far too fast a KDF for password-derived keys: anyone who dumps
+// the ciphertext (SRWP hands it out raw, no password needed) can
+// brute-force offline at GPU hash rates. New formats use
+// crypt_kdf_pbkdf2() below. Do not use this for anything new.
 int crypt_kdf(const char *password, const uint8_t *salt, uint8_t *key_out);
+
+// derives a 32-byte key with PBKDF2-HMAC-SHA256 (LTSF algo 2). The
+// full password string participates (no 32-char truncation). `iters`
+// is stored in LTSF metadata so it can be tuned per-device/per-era
+// without a format break. ~100k iterations runs in roughly a second
+// on the RP2040 at 120MHz -- imperceptible at unlock time, but five
+// orders of magnitude more work per guess for an offline attacker
+// than the legacy single hash. Returns 1 on success, 0 on failure.
+int crypt_kdf_pbkdf2(const char *password, const uint8_t *salt,
+	uint32_t iters, uint8_t *key_out);
 
 int crypt_encrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 	const uint8_t *pt, size_t pt_size,

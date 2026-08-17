@@ -56,7 +56,11 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "pico/stdlib.h"
+#include "hardware/watchdog.h"
+
 #include "blaustahl.h"
+#include "ltsf.h"
 #include "vt100.h"
 #include "vt100_input.h"
 #include "storage.h"
@@ -79,8 +83,13 @@
 #define CLI_LINE_MAX 2048
 #define CLI_CMD_MAX 24
 #define CLI_ARG_MAX STORAGE_NAME_LEN
-#define CLI_PW_MAX 40		// passwords are capped at 32 chars (see the
-							// password prompts below) -- kept separate
+#define CLI_PW_MAX 64		// up to 63-char passphrases. The PBKDF2 KDF
+							// uses the full string (the legacy KDF's
+							// silent 32-char truncation is gone for
+							// newly-created formats) -- long diceware
+							// passphrases are exactly what to encourage
+							// on a device whose ciphertext is dumpable
+							// over USB without a password. Kept separate
 							// from CLI_LINE_MAX so growing the line
 							// buffer for multi-line input doesn't
 							// also balloon this
@@ -231,7 +240,9 @@ static bool cli_dispatch(const char *cmd, const char *arg1, const char *arg2) {
 		       "  ls\r\n"
 		       "  info\r\n"
 		       "  password\r\n"
+		       "  lock\r\n"
 		       "  disable_encryption\r\n"
+		       "  reboot\r\n"
 		       "  view <filename>\r\n"
 		       "  xmodem_up <filename>\r\n"
 		       "  xmodem_down <filename|fram|sram>\r\n"
@@ -285,17 +296,25 @@ static bool cli_dispatch(const char *cmd, const char *arg1, const char *arg2) {
 			default:               fram_status = "UNKNOWN";            break;
 		}
 
+		const char *kdf_note = "";
+		if (storage_crypt_algo() == LTSF_ALGO_SHA256_CHACHA20_POLY1305)
+			kdf_note = ", LEGACY KDF -- UNLOCK ONCE TO UPGRADE";
+
 		printf("FIRMWARE: %s\r\n"
 		       "BOARD ID: %s\r\n"
-		       "FRAM: %i BYTES (%s)\r\n"
+		       "FRAM: %i BYTES (%s%s)\r\n"
 		       "SRAM: %i BYTES\r\n"
 		       "FLASH: %i FILES, %u/%u KB FREE\r\n",
 			BLAUSTAHL_VERSION,
 			board_id,
-			FRAM_AVAILABLE, fram_status,
+			FRAM_AVAILABLE, fram_status, kdf_note,
 			FRAM_AVAILABLE,
 			storage_file_count(),
 			storage_flash_free() / 1024, storage_flash_total() / 1024);
+
+		if (storage_recovered_this_boot())
+			printf("NOTE: AN INTERRUPTED FRAM COMMIT WAS RECOVERED FROM "
+				"THE FLASH JOURNAL AT STARTUP.\r\n");
 
 #ifdef BLAUSTAHL_APPS_ENABLED
 		uint32_t sys_total = ms_glue_system_heap_total();
@@ -318,7 +337,7 @@ static bool cli_dispatch(const char *cmd, const char *arg1, const char *arg2) {
 
 		if (st == CRYPT_UNLOCKED) {
 			printf("ENTER NEW PASSWORD (THIS WILL CHANGE THE EXISTING "
-				"ONE), 1-32 CHARS:");
+				"ONE), 1-%i CHARS:", CLI_PW_MAX - 1);
 			pw_new_is_rotation = true;
 			state = CLI_PW_NEW1;
 		} else if (st == CRYPT_LOCKED) {
@@ -326,13 +345,41 @@ static bool cli_dispatch(const char *cmd, const char *arg1, const char *arg2) {
 			state = CLI_PW_UNLOCK;
 		} else {
 			printf("ENTER NEW PASSWORD (THIS WILL ENCRYPT FRAM), "
-				"1-32 CHARS:");
+				"1-%i CHARS:", CLI_PW_MAX - 1);
 			pw_new_is_rotation = false;
 			state = CLI_PW_NEW1;
 		}
 
 		return true;
 
+	}
+
+	if (strcmp(cmd, "lock") == 0) {
+
+		crypt_status_t st = storage_crypt_status();
+
+		if (st == CRYPT_PLAINTEXT) {
+			printf("FRAM IS NOT ENCRYPTED.");
+		} else if (st == CRYPT_LOCKED) {
+			printf("ALREADY LOCKED.");
+		} else if (storage_crypt_lock()) {
+			printf("LOCKED. (password COMMAND UNLOCKS.)");
+			try_jump_to_fram();
+		} else {
+			printf("UNCOMMITTED EDITS IN THE FRAM BUFFER -- "
+				"COMMIT (CTRL-W IN THE EDITOR) FIRST.");
+		}
+
+		return true;
+
+	}
+
+	if (strcmp(cmd, "reboot") == 0) {
+		printf("REBOOTING...\r\n");
+		fflush(stdout);
+		sleep_ms(50);			// let the message reach the host
+		watchdog_reboot(0, 0, 0);
+		while (1) tight_loop_contents();	// unreachable
 	}
 
 	if (strcmp(cmd, "disable_encryption") == 0) {
@@ -634,16 +681,22 @@ static void cli_handle_pw_new2(const char *input) {
 	if (strcmp(input, pw_first) != 0) {
 		printf("PASSWORD MISMATCH, CANCELLED.");
 	} else if (pw_new_is_rotation) {
+		printf("DERIVING KEY (PBKDF2, ~1S)...\r\n");
+		fflush(stdout);
 		if (storage_crypt_change_password(input)) {
 			printf("PASSWORD CHANGED.");
 		} else {
 			printf("FAILED TO CHANGE PASSWORD.");
 		}
-	} else if (storage_crypt_enable(input)) {
-		printf("FRAM ENCRYPTED AND UNLOCKED.");
-		try_jump_to_fram();
 	} else {
-		printf("FAILED TO ENABLE ENCRYPTION.");
+		printf("DERIVING KEY (PBKDF2, ~1S)...\r\n");
+		fflush(stdout);
+		if (storage_crypt_enable(input)) {
+			printf("FRAM ENCRYPTED AND UNLOCKED.");
+			try_jump_to_fram();
+		} else {
+			printf("FAILED TO ENABLE ENCRYPTION.");
+		}
 	}
 
 	memset(pw_first, 0, sizeof(pw_first));
@@ -653,8 +706,18 @@ static void cli_handle_pw_new2(const char *input) {
 
 static void cli_handle_pw_unlock(const char *input) {
 
+	uint8_t algo_before = storage_crypt_algo();
+
+	printf("DERIVING KEY...\r\n");
+	fflush(stdout);
+
 	if (storage_crypt_unlock(input)) {
 		printf("UNLOCKED.");
+		if (algo_before == LTSF_ALGO_SHA256_CHACHA20_POLY1305 &&
+				storage_crypt_algo() ==
+					LTSF_ALGO_PBKDF2_SHA256_CHACHA20_POLY1305)
+			printf("\r\nENCRYPTION FORMAT UPGRADED: LEGACY SHA256 KDF "
+				"-> PBKDF2 (SAME PASSWORD).");
 		try_jump_to_fram();
 	} else {
 		printf("INCORRECT PASSWORD.");

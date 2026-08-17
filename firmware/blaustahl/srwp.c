@@ -103,9 +103,15 @@
 // once a command has started (the leading 0x00 marker was already
 // consumed by the caller), it's reasonable to wait a bounded time per
 // byte for the rest of it rather than abandon the parse on any single
-// timing gap -- matches xmodem.c's own established philosophy for the
-// same reason.
-#define SRWP_BYTE_TIMEOUT_MS 3000
+// timing gap. 800ms is orders of magnitude beyond any real USB
+// scheduling gap while keeping the worst case survivable: with the
+// old 3000ms value, a desynced host (or one byte of line noise
+// landing on the 0x00 marker) could leave the device swallowing --
+// and with CMD_TEST, echoing -- every subsequent byte for minutes,
+// re-arming the timeout with each one. Observed in practice against
+// real host tooling; 800ms makes "just stop sending for a second"
+// a reliable escape hatch.
+#define SRWP_BYTE_TIMEOUT_MS 800
 
 // transfers stream through this fixed-size buffer regardless of the
 // requested length -- never sized from a host-controlled value. 128
@@ -157,19 +163,51 @@ static bool srwp_read_u32(uint32_t *out) {
 
 }
 
-static void srwp_write_bytes(const uint8_t *buf, uint32_t len) {
-	for (uint32_t i = 0; i < len; i++) tud_cdc_write_char(buf[i]);
+// waits (bounded) for TX FIFO space before every byte rather than
+// silently dropping. The previous tud_cdc_write_char() loop dropped
+// bytes the moment the 64-byte full-speed CDC TX FIFO filled -- so
+// any CMD_READ longer than ~64 bytes truncated its reply mid-stream,
+// desyncing the host. (Measured on real hardware: an 8KB read
+// returned ~130 bytes.) This is the exact failure mode blaustahl.c's
+// cdc_putchar_reliable() comment describes for XMODEM blocks; SRWP
+// replies have the same can't-lose-a-byte framing. Not literally
+// cdc_putchar_reliable() though: that flushes after every byte
+// (fine for XMODEM's 133-byte bursts), which for an 8KB reply would
+// mean thousands of 1-byte USB transfers. Here the flush happens
+// when the FIFO fills and once at the end, so replies move in full
+// 64-byte packets. Returns false if the host stopped reading --
+// callers abort the command cleanly.
+static bool srwp_write_bytes(const uint8_t *buf, uint32_t len) {
+
+	if (!tud_cdc_connected()) return false;
+
+	for (uint32_t i = 0; i < len; i++) {
+
+		absolute_time_t deadline = make_timeout_time_ms(1000);
+
+		while (!tud_cdc_write_available()) {
+			tud_cdc_write_flush();	// kick the queued bytes out --
+									// core0's tud_task() drains them
+			if (time_reached(deadline)) return false;
+		}
+
+		tud_cdc_write_char(buf[i]);
+
+	}
+
 	tud_cdc_write_flush();
+	return true;
+
 }
 
-static void srwp_write_u32(uint32_t v) {
+static bool srwp_write_u32(uint32_t v) {
 	uint8_t b[4] = {
 		(uint8_t)(v & 0xff),
 		(uint8_t)((v >> 8) & 0xff),
 		(uint8_t)((v >> 16) & 0xff),
 		(uint8_t)((v >> 24) & 0xff),
 	};
-	srwp_write_bytes(b, 4);
+	return srwp_write_bytes(b, 4);
 }
 
 // CMD_TEST: echo `len` bytes back exactly as received. No FRAM
@@ -188,7 +226,7 @@ static void cmd_test(void) {
 	while (remaining > 0) {
 		uint32_t chunk = remaining < SRWP_CHUNK_SIZE ? remaining : SRWP_CHUNK_SIZE;
 		if (!srwp_read_bytes(chunk_buf, chunk)) return;
-		srwp_write_bytes(chunk_buf, chunk);
+		if (!srwp_write_bytes(chunk_buf, chunk)) return;
 		remaining -= chunk;
 	}
 
@@ -219,7 +257,7 @@ static void cmd_read(void) {
 		uint32_t chunk = valid_len - offset;
 		if (chunk > SRWP_CHUNK_SIZE) chunk = SRWP_CHUNK_SIZE;
 		fram_read((char *)chunk_buf, (int)(addr + offset), (int)chunk);
-		srwp_write_bytes(chunk_buf, chunk);
+		if (!srwp_write_bytes(chunk_buf, chunk)) return;
 		offset += chunk;
 	}
 
@@ -232,7 +270,7 @@ static void cmd_read(void) {
 
 		while (pad > 0) {
 			uint32_t chunk = pad < SRWP_CHUNK_SIZE ? pad : SRWP_CHUNK_SIZE;
-			srwp_write_bytes(chunk_buf, chunk);
+			if (!srwp_write_bytes(chunk_buf, chunk)) return;
 			pad -= chunk;
 		}
 
@@ -285,7 +323,7 @@ static void cmd_write(void) {
 // -- deliberately not the smaller, metadata-excluded FRAM_AVAILABLE
 // figure used elsewhere in the firmware.
 static void cmd_size(void) {
-	srwp_write_u32(SRWP_FRAM_SIZE);
+	(void)srwp_write_u32(SRWP_FRAM_SIZE);
 }
 
 void srwp(void) {
