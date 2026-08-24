@@ -724,7 +724,47 @@ void editor_yield(void) {
 
 			if (cc == CH_BS || cc == CH_DEL) {
 				if (!writable) break;
-				if (cursor_offset % bytes_per_row() == 0) break;
+
+				long bpr = bytes_per_row();
+
+				if (cursor_offset % bpr == 0) {
+					// At the start of a row: only bail out if
+					// there's no previous row on this page to
+					// wrap into (mirrors move_grid's own row
+					// clamp) -- otherwise wrap back to the
+					// previous row's last column and erase the
+					// character there, instead of doing nothing.
+					long ps = page_size();
+					long page_start = (cursor_offset / ps) * ps;
+					if (cursor_offset == page_start) break;
+
+					move_grid(0, -1);
+					storage_write(current_file, cursor_offset, 0x00);
+
+					// move_grid jumped us to a different row, so
+					// (unlike the same-row case below) a plain
+					// CURSOR_LEFT won't reach the right screen
+					// cell -- position explicitly, same as
+					// editor_status() does.
+					long offset_in_page = cursor_offset - page_start;
+					int row = (int)(offset_in_page / bpr);
+					int col = (int)(offset_in_page % bpr);
+
+					if (render_mode == 0)
+						printf(VT100_CURSOR_MOVE_TO, row + 1, col + 1);
+					else
+						printf(VT100_CURSOR_MOVE_TO, row + 1, hex_col_for_byte(col));
+
+					printf(".");
+
+					if (render_mode == 0)
+						printf(VT100_CURSOR_MOVE_TO, row + 1, col + 1);
+					else
+						printf(VT100_CURSOR_MOVE_TO, row + 1, hex_col_for_byte(col));
+
+					break;
+				}
+
 				move_grid(0, -1);
 				storage_write(current_file, cursor_offset, 0x00);
 				printf(VT100_CURSOR_LEFT);
