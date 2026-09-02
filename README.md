@@ -1,3 +1,57 @@
+# Blaustahl Storage Device (hardened fork)
+
+> **This fork** (firmware v0.2.1-hardened) strengthens the 0.1.0 firmware,
+> with full backward compatibility for existing data:
+>
+> - **Real KDF.** FRAM encryption now derives keys with PBKDF2-HMAC-SHA256
+>   (100,000 iterations, count stored in metadata) instead of a single
+>   SHA-256 -- roughly five orders of magnitude more work per guess for an
+>   offline attacker who dumps the ciphertext over USB. Existing
+>   legacy-format data still unlocks and is transparently re-encrypted
+>   under the new KDF on the next successful unlock. Passwords up to 63
+>   chars now participate in full (no silent 32-char truncation).
+> - **Crash-safe commits.** Every whole-image FRAM rewrite (enabling
+>   encryption, encrypted CTRL-W commits, password changes, disabling
+>   encryption) is journaled to the flash filesystem (CRC-checked,
+>   atomically renamed) before FRAM is touched, and recovered at next boot
+>   if interrupted. Previously a power loss during an encrypted commit
+>   destroyed both old and new content beyond recovery. Plaintext is still
+>   never written to flash: plaintext-bound transitions journal the
+>   pre-state ciphertext and roll back instead.
+> - **Reliable SRWP.** SRWP replies longer than ~64 bytes were silently
+>   truncated (CDC TX FIFO overflow -- an 8KB read returned ~130 bytes).
+>   Replies now use flow-controlled writes end to end, and the per-byte
+>   input timeout dropped from 3s to 800ms so a desynced host can always
+>   escape by pausing briefly.
+> - **`lock` and `reboot` CLI commands.** `lock` drops the session key and
+>   plaintext buffers without unplugging; `reboot` restarts the device.
+> - **Magic-baud recovery.** Setting the serial port to 1200 baud reboots
+>   the device into the UF2 bootloader, 2400 baud reboots the application
+>   -- handled on core0's USB task, so it works even if the application
+>   core is wedged (e.g. by a runaway Scheme evaluation, which previously
+>   required unplugging). `stty -F /dev/ttyACM0 1200`
+> - **Faster unlock.** Dropped mbedtls's size-optimized SHA-256; PBKDF2
+>   key derivation went from ~34s to ~10s per unlock on the RP2040.
+> - **USB on one core.** TinyUSB is built without locking, and the stock
+>   firmware ran it from both cores (core1 called tud_cdc_* directly and
+>   its printf went through pico_stdio_usb, which calls tud_task itself).
+>   That could leave the CDC OUT endpoint never re-armed: the device stayed
+>   enumerated but stopped accepting bytes. All USB calls now live on
+>   core0; the application talks through two cross-core rings.
+> - **Key slot hygiene.** Every PSA key import is paired with a release.
+>   Before, 32 wrong-password attempts exhausted mbedtls's static key
+>   slots and the correct passphrase was then rejected until a power
+>   cycle (reproduced on hardware, regression test in tools/host).
+> - **4800 baud** prints a core1 liveness dump (heartbeat, phase, FIFO and
+>   ring levels, heap, stack low-water) from core0.
+>
+> Known limitation (inherited from upstream): a deliberately infinite
+> Scheme evaluation still hangs the application core until a magic-baud
+> or physical reset; the interpreter has no step budget.
+>
+> Upstream: [machdyne/blaustahl](https://github.com/machdyne/blaustahl).
+> Original README follows.
+
 # Blaustahl Storage Device
 
 The Blaustahl USB dongle provides long-term storage for 7,680 characters of text, backed by non-volatile FRAM memory — no batteries, no wear-out from repeated writes, and no risk of losing data if the device is unplugged. Simply plug it into your computer and open any serial communications program that supports VT100 emulation (PuTTY, Tera Term, Minicom, screen, etc.) to access the built-in editor.
