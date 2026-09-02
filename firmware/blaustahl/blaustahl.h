@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define BLAUSTAHL_VERSION "0.1.0"
+#define BLAUSTAHL_VERSION "0.2.1-hardened"
 
 #define FRAM_SIZE 8192		// 8KB
 //#define FRAM_SIZE 262144	// 256KB
@@ -21,11 +21,35 @@
  #define FRAM_BIG
 #endif
 
+#include <stdbool.h>
+
 int cdc_getchar(void);
 void cdc_putchar(const char ch);
 
+// like cdc_putchar() but waits (bounded) for space in the outbound
+// ring instead of silently dropping when it's full -- required for any
+// multi-byte payload whose framing can't survive a lost byte (XMODEM
+// blocks, SRWP replies). Previously defined in blaustahl.c but never
+// declared anywhere, so xmodem.c was calling it through an implicit
+// declaration. Returns false if the host stopped reading.
+bool cdc_putchar_reliable(const char ch);
+
+// cdc_putchar_reliable() over a whole buffer, with the same per-byte
+// bound and the same false-on-host-stopped-reading result. Every file
+// but blaustahl.c sends bulk data this way, because core0 owns the USB
+// device stack and nothing else may call tud_cdc_write*().
+bool cdc_write_reliable(const uint8_t *buf, uint32_t len);
+
 void blaustahl_led(uint16_t intensity);
 void blaustahl_dfu(void);
+
+// core1 liveness instrumentation, read by core0 on a 4800-baud touch
+enum core1_phase {
+	PH_IDLE = 0, PH_KDF, PH_CRYPT, PH_JOURNAL, PH_FLASH,
+	PH_XMODEM, PH_MS_EVAL, PH_TE,
+};
+extern volatile uint32_t core1_heartbeat;
+extern volatile uint8_t core1_phase;
 
 // USB VENDOR CLASS COMMANDS
 

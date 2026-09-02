@@ -119,7 +119,16 @@ if(BLAUSTAHL_ENABLE_APPS)
 	# so it's a transient cost only while "scheme" is actually running,
 	# not a permanent reservation. Revisit both numbers once real
 	# hardware free-RAM measurement is available.
-	set(MS_HEAP_CELLS "3000" CACHE STRING "Machdyne Scheme heap size, in cells")
+	# 2000 cells (~48KB), down from the original 3000 (~72KB): the
+	# "revisit once real hardware free-RAM measurement is available"
+	# moment arrived. Measured: .bss is now ~134KB of 264KB, leaving
+	# ~130KB for stacks + heap; with a 72KB Scheme session reallocated
+	# on every CLI entry plus XMODEM's transient 32KB staging buffer,
+	# long interactive sessions fragmented the heap to the point of
+	# malloc failures and (observed twice on hardware) a wedged core1
+	# around heavy-churn moments. 48KB keeps a full standard-library
+	# session working while restoring ~24KB of headroom.
+	set(MS_HEAP_CELLS "2000" CACHE STRING "Machdyne Scheme heap size, in cells")
 	set(MS_PROTECT_STACK_SLOTS "512" CACHE STRING "Machdyne Scheme protect stack size, in slots")
 
 	target_sources(blaustahl PUBLIC
@@ -203,9 +212,15 @@ add_compile_definitions(PICO_FLASH_ASSERT_ON_UNSAFE=0)
 
 pico_sdk_init()
 
-pico_enable_stdio_usb(blaustahl 1)
+# stdout does NOT go through pico_stdio_usb any more. Its out_chars()
+# calls tud_task() on whichever core happens to printf(), and the
+# application runs on core1 while core0 owns the USB device stack.
+# blaustahl.c registers its own stdio driver instead, feeding core0's
+# outbound ring and never touching TinyUSB. See the cdc_pump() comment
+# there for why the device stack has to stay on one core.
+pico_enable_stdio_usb(blaustahl 0)
 pico_enable_stdio_uart(blaustahl 0)
-pico_enable_stdio_usb(blaustahl_cdconly 1)
+pico_enable_stdio_usb(blaustahl_cdconly 0)
 pico_enable_stdio_uart(blaustahl_cdconly 0)
 
 target_compile_definitions(blaustahl PUBLIC
@@ -225,8 +240,8 @@ target_compile_definitions(blaustahl_cdconly PUBLIC
 	MBEDTLS_CONFIG_FILE="mbedtls_config.h"
 	)
 
-target_link_libraries(blaustahl PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore pico_stdio_usb hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id tinyusb_device)
-target_link_libraries(blaustahl_cdconly PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore pico_stdio_usb hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id tinyusb_device)
+target_link_libraries(blaustahl PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
+target_link_libraries(blaustahl_cdconly PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
 
 pico_add_extra_outputs(blaustahl)
 pico_add_extra_outputs(blaustahl_cdconly)

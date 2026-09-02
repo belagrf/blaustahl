@@ -41,6 +41,7 @@
  */
 
 #include <string.h>
+#include "blaustahl.h"
 
 #include "pico/flash.h"
 #include "hardware/flash.h"
@@ -148,6 +149,7 @@ static lfs_t lfs;
 static bool mounted = false;
 
 void flash_storage_init(void) {
+	core1_phase = PH_FLASH;
 
 	int err = lfs_mount(&lfs, &flash_cfg);
 
@@ -163,6 +165,7 @@ void flash_storage_init(void) {
 }
 
 bool flash_storage_format(void) {
+	core1_phase = PH_FLASH;
 
 	if (mounted) {
 		lfs_unmount(&lfs);
@@ -293,6 +296,7 @@ uint32_t flash_storage_read(const char *name, uint32_t offset, char *buf,
 
 bool flash_storage_write_file(const char *name, const char *data,
 		uint32_t len) {
+	core1_phase = PH_FLASH;
 
 	if (!mounted) return false;
 
@@ -310,11 +314,13 @@ bool flash_storage_write_file(const char *name, const char *data,
 }
 
 bool flash_storage_rename(const char *old_name, const char *new_name) {
+	core1_phase = PH_FLASH;
 	if (!mounted) return false;
 	return lfs_rename(&lfs, old_name, new_name) == 0;
 }
 
 bool flash_storage_delete(const char *name) {
+	core1_phase = PH_FLASH;
 	if (!mounted) return false;
 	return lfs_remove(&lfs, name) == 0;
 }

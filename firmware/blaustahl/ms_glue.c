@@ -240,6 +240,7 @@ long ms_glue_heap_live(void) { return ms_gc_live_count(); }
 long ms_glue_heap_size(void) { return ms_gc_heap_size(); }
 
 void ms_glue_eval_line(const char *line) {
+	core1_phase = PH_MS_EVAL;
 
 	if (!session_ready) {
 		printf("SCHEME SESSION NEVER INITIALIZED -- SEE THE MESSAGE ABOVE.\r\n");
