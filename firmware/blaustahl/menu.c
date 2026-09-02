@@ -208,9 +208,10 @@ static void menu_move(int delta) {
 // otherwise switches to it, resetting position, since that's a
 // genuinely different file. FRAM and SRAM each keep their own
 // independent buffer (see storage.c), so switching never discards
-// unsaved edits on either side -- storage_select() can't actually be
-// refused anymore, but the check below is kept as a defensive no-op
-// in case a future failure mode is ever added there.
+// unsaved edits on either side. storage_select() can still refuse when
+// unlocked FRAM fails to decrypt into its buffer (a raw SRWP write can
+// corrupt the ciphertext underneath a live session), so the check
+// below is real.
 static void select_editor_file(file_ref_t f) {
 
 	if (current_file.kind == f.kind) {
@@ -223,8 +224,8 @@ static void select_editor_file(file_ref_t f) {
 		printf(VT100_CLEAR_HOME);
 		printf(VT100_ERASE_SCREEN);
 		printf(VT100_CURSOR_MOVE_TO, 24, 1);
-		printf("BLAUSTAHL -- COMMIT (CTRL-W) OR EXIT (CTRL-B) "
-			"THE BUFFER BEFORE SWITCHING FILES");
+		printf("BLAUSTAHL -- CANNOT OPEN: DIRTY BUFFER (CTRL-W/CTRL-B) "
+			"OR FRAM FAILED TO DECRYPT (RE-ENTER PASSWORD)");
 		fflush(stdout);
 		return;
 	}
