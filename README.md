@@ -1,7 +1,7 @@
 # Blaustahl Storage Device (hardened fork)
 
-> **This fork** (firmware v0.2.0-hardened) strengthens the 0.1.0 firmware in
-> four areas, with full backward compatibility for existing data:
+> **This fork** (firmware v0.2.1-hardened) strengthens the 0.1.0 firmware,
+> with full backward compatibility for existing data:
 >
 > - **Real KDF.** FRAM encryption now derives keys with PBKDF2-HMAC-SHA256
 >   (100,000 iterations, count stored in metadata) instead of a single
@@ -32,6 +32,18 @@
 >   required unplugging). `stty -F /dev/ttyACM0 1200`
 > - **Faster unlock.** Dropped mbedtls's size-optimized SHA-256; PBKDF2
 >   key derivation went from ~34s to ~10s per unlock on the RP2040.
+> - **USB on one core.** TinyUSB is built without locking, and the stock
+>   firmware ran it from both cores (core1 called tud_cdc_* directly and
+>   its printf went through pico_stdio_usb, which calls tud_task itself).
+>   That could leave the CDC OUT endpoint never re-armed: the device stayed
+>   enumerated but stopped accepting bytes. All USB calls now live on
+>   core0; the application talks through two cross-core rings.
+> - **Key slot hygiene.** Every PSA key import is paired with a release.
+>   Before, 32 wrong-password attempts exhausted mbedtls's static key
+>   slots and the correct passphrase was then rejected until a power
+>   cycle (reproduced on hardware, regression test in tools/host).
+> - **4800 baud** prints a core1 liveness dump (heartbeat, phase, FIFO and
+>   ring levels, heap, stack low-water) from core0.
 >
 > Known limitation (inherited from upstream): a deliberately infinite
 > Scheme evaluation still hangs the application core until a magic-baud

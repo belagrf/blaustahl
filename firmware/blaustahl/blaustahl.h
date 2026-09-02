@@ -9,7 +9,7 @@
 
 #include <stdint.h>
 
-#define BLAUSTAHL_VERSION "0.2.0-hardened"
+#define BLAUSTAHL_VERSION "0.2.1-hardened"
 
 #define FRAM_SIZE 8192		// 8KB
 //#define FRAM_SIZE 262144	// 256KB
