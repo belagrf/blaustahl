@@ -41,6 +41,15 @@ int crypt_init(psa_key_id_t *key, const uint8_t *key_bytes) {
 
 }
 
+void crypt_key_release(psa_key_id_t *key) {
+
+	if (!key || !*key) return;
+
+	psa_destroy_key(*key);
+	*key = 0;
+
+}
+
 int crypt_hash(const uint8_t *data, size_t len, uint8_t *out32) {
 
 	size_t out_len = 0;

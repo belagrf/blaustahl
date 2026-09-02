@@ -165,6 +165,11 @@ uint32_t editor_copy_buffer_len(void) {
 	return copy_buffer_len;
 }
 
+void editor_copy_buffer_clear(void) {
+	memset(copy_buffer, 0, sizeof(copy_buffer));
+	copy_buffer_len = 0;
+}
+
 bool write_enabled = false;
 bool status_enabled = true;
 

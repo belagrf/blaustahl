@@ -49,6 +49,13 @@ void editor_copy_buffer_set(const uint8_t *data, uint32_t len);
 uint32_t editor_copy_buffer_get(uint8_t *out, uint32_t max_len);
 uint32_t editor_copy_buffer_len(void);
 
+// zeroes the copy buffer. Called by cli.c's `lock` command: the buffer
+// can hold up to 2KB lifted out of decrypted FRAM, which would
+// otherwise outlive a lock that is supposed to leave no plaintext in
+// RAM. storage.c does not call this itself, on purpose -- the storage
+// layer knows nothing about the editor and stays that way.
+void editor_copy_buffer_clear(void);
+
 // enters MODE_HELP. Any keypress returns to whichever mode was
 // active before help was triggered (tracked internally). Called by
 // CTRL-G and by the menu bar's HELP item.

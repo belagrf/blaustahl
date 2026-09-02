@@ -159,10 +159,15 @@ bool storage_crypt_enable(const char *password);
 // unlock, using the same password.
 bool storage_crypt_unlock(const char *password);
 
-// drop the session key and every RAM copy of FRAM plaintext, leaving
-// encrypted FRAM locked again (what unplugging achieves, without
-// unplugging). False if not currently unlocked, or if the FRAM buffer
-// holds uncommitted edits (commit first -- lock never discards work).
+// drop the session key and the FRAM plaintext storage.c itself holds
+// (the FRAM write buffer and its decrypt scratch), leaving encrypted
+// FRAM locked again -- what unplugging achieves, without unplugging.
+// False if not currently unlocked, or if the FRAM buffer holds
+// uncommitted edits (commit first -- lock never discards work).
+//
+// Plaintext lifted OUT of FRAM by another module stays that module's
+// to clear: cli.c's `lock` command calls editor_copy_buffer_clear()
+// alongside this one for exactly that reason.
 bool storage_crypt_lock(void);
 
 // changes the password on already-unlocked, encrypted FRAM: decrypts
