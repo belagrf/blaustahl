@@ -7,6 +7,9 @@ algo-1 migration with auto-upgrade, ciphertext corruption detection,
 flash-journal boot recovery, and the lock command. Leaves the device
 encrypted at the end only if a test failed; cleanup is a separate
 script so a failure leaves evidence in place.
+
+`--t11` runs the PSA key slot exhaustion regression on its own. It is
+not part of the default flow because it takes about six minutes.
 """
 import sys, os, time, struct, zlib, hashlib
 sys.path.insert(0, os.path.dirname(__file__))
@@ -131,6 +134,62 @@ def cli_password_unlock(lk, pw, check_state=True):
         return out, dt, "unchecked"
     state, _ = crypt_state(lk)
     return out, dt, state
+
+
+def t11_slot_exhaustion(lk):
+    """Regression for PSA key slot exhaustion on repeated wrong unlocks.
+
+    mbedtls 2.28 gives the firmware 32 volatile key slots and never
+    recycles them. Verifying a password means importing the derived key
+    and attempting a real decrypt, so every wrong attempt consumes a
+    slot. When the firmware dropped the handle instead of destroying it,
+    the 33rd import failed outright and the CORRECT password then read
+    as INCORRECT PASSWORD until the next power cycle.
+
+    Needs an encrypted, locked device. Leaves it unlocked. Each attempt
+    costs roughly 10 seconds of PBKDF2 on the device, so progress is
+    printed per attempt.
+    """
+    wrong = "wrong-password-slot-exhaustion"
+    attempts = 33
+
+    state, _ = crypt_state(lk)
+    assert state == "locked", \
+        "T11 needs an encrypted, locked device (state=%s)" % state
+
+    for i in range(1, attempts + 1):
+        out, dt, state = cli_password_unlock(lk, wrong)
+        print("   wrong attempt %d/%d: %.1fs state=%s %r"
+              % (i, attempts, dt, state, out.strip()[-40:]))
+        if state != "locked":
+            check("T11 wrong password %d/%d leaves device locked" % (i, attempts),
+                  False, "(state=%s, msg=%r)" % (state, out.strip()[-60:]))
+            return
+    check("T11 %d wrong passwords all leave device locked" % attempts, True)
+
+    print("   now the correct password")
+    out, dt, state = cli_password_unlock(lk, PW)
+    check("T11 correct password still unlocks after %d failures" % attempts,
+          state == "unlocked",
+          "(%.1fs, state=%s, msg=%r)" % (dt, state, out.strip()[-60:]))
+
+
+def report():
+    print("\n==== RESULTS ====")
+    passed = sum(1 for _, ok in R if ok)
+    for name, ok in R:
+        print(" %s  %s" % ("PASS" if ok else "FAIL", name))
+    print("%d/%d passed" % (passed, len(R)))
+    return 0 if passed == len(R) else 1
+
+
+def main_t11():
+    lk = fresh_link()
+    print("port:", lk.port)
+    t11_slot_exhaustion(lk)
+    rc = report()
+    lk.close()
+    return rc
 
 
 def main():
@@ -354,14 +413,10 @@ def main():
     out = lk.cli("ls", timeout=8.0)
     check("T10 journal consumed after recovery", "fram_commit.jrn" not in out)
 
-    print("\n==== SUITE RESULTS ====")
-    passed = sum(1 for _, ok in R if ok)
-    for name, ok in R:
-        print(" %s  %s" % ("PASS" if ok else "FAIL", name))
-    print("%d/%d passed" % (passed, len(R)))
+    rc = report()
     lk.close()
-    return 0 if passed == len(R) else 1
+    return rc
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main_t11() if "--t11" in sys.argv else main())
