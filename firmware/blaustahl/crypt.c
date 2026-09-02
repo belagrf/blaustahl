@@ -14,6 +14,10 @@
  */
 
 #include <string.h>
+#include "blaustahl.h"
+
+#include <mbedtls/pkcs5.h>
+#include <mbedtls/md.h>
 
 #include "crypt.h"
 
@@ -35,6 +39,15 @@ int crypt_init(psa_key_id_t *key, const uint8_t *key_bytes) {
 	status = psa_import_key(&attributes, key_bytes, key_bits / 8, key);
 
 	return status == PSA_SUCCESS ? 1 : 0;
+
+}
+
+void crypt_key_release(psa_key_id_t *key) {
+
+	if (!key || !*key) return;
+
+	psa_destroy_key(*key);
+	*key = 0;
 
 }
 
@@ -62,9 +75,40 @@ int crypt_kdf(const char *password, const uint8_t *salt, uint8_t *key_out) {
 
 }
 
+int crypt_kdf_pbkdf2(const char *password, const uint8_t *salt,
+		uint32_t iters, uint8_t *key_out) {
+	core1_phase = PH_KDF;
+
+	if (!password || !password[0] || iters == 0) return 0;
+
+	// mbedtls 2.28 API (what pico-sdk vendors): caller sets up the
+	// HMAC context, mbedtls_pkcs5_pbkdf2_hmac() then keys it once and
+	// reuses it across all iterations -- unlike hand-rolling per-
+	// iteration psa_mac_compute() calls (whose per-call key import
+	// overhead would roughly triple the runtime for zero security
+	// benefit).
+	const mbedtls_md_info_t *info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+	if (!info) return 0;
+
+	mbedtls_md_context_t md;
+	mbedtls_md_init(&md);
+
+	int ret = mbedtls_md_setup(&md, info, 1 /* HMAC */);
+	if (ret == 0)
+		ret = mbedtls_pkcs5_pbkdf2_hmac(&md,
+			(const unsigned char *)password, strlen(password),
+			salt, 16, iters, 32, key_out);
+
+	mbedtls_md_free(&md);
+
+	return ret == 0 ? 1 : 0;
+
+}
+
 int crypt_encrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 		const uint8_t *pt, size_t pt_size,
 		uint8_t *ct, size_t ct_size, size_t *ct_len) {
+	core1_phase = PH_CRYPT;
 
 	psa_status_t status = psa_aead_encrypt(key,
 		PSA_ALG_CHACHA20_POLY1305,
@@ -80,6 +124,7 @@ int crypt_encrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 int crypt_decrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 		const uint8_t *ct, size_t ct_size,
 		uint8_t *pt, size_t pt_size, size_t *pt_len) {
+	core1_phase = PH_CRYPT;
 
 	psa_status_t status = psa_aead_decrypt(key,
 		PSA_ALG_CHACHA20_POLY1305,
