@@ -19,3 +19,9 @@ exercised against real hardware.
 Requires python3 + the `cryptography` package for the interop tests.
 If the device ever stops responding: `stty -F /dev/ttyACM0 2400`
 reboots the application, `1200` reboots into the UF2 bootloader.
+
+- `stress.py <io|heap|mixed|overlap> --rounds N [--diag]` — liveness
+  stress profiles used to hunt the core1 wedge; `--diag` captures the
+  4800-baud DIAG dump on a wedge, then recovers via 2400 baud.
+- `t11_setup.py` — puts a device into the encrypted, locked state that
+  `suite.py --t11` (PSA key slot exhaustion regression) requires.
