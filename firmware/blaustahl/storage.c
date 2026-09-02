@@ -858,22 +858,22 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 			crypt_scratch, FRAM_AVAILABLE + 16,
 			plain_scratch, FRAM_AVAILABLE, &pt_len))
 		return false;
-	if (pt_len != FRAM_AVAILABLE) return false;
+	if (pt_len != FRAM_AVAILABLE) { memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 
 	// derive a NEW key from a genuinely fresh salt (same generation
 	// as enabling encryption from scratch)
 	uint8_t new_salt[16];
-	if (!generate_new_salt(new_salt)) return false;
+	if (!generate_new_salt(new_salt)) { memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 
 	uint8_t derived_key[32];
 	if (!crypt_kdf_pbkdf2(new_password, new_salt, STORAGE_KDF_ITERS,
 			derived_key))
-		return false;
+		{ memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 
 	psa_key_id_t new_key_id;
 	bool imported = crypt_init(&new_key_id, derived_key);
 	memset(derived_key, 0, sizeof(derived_key));
-	if (!imported) return false;
+	if (!imported) { memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 
 	uint8_t new_nonce[12];
 	memset(new_nonce, 0, 12);
@@ -887,7 +887,7 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 			crypt_scratch, sizeof(crypt_scratch), &ct_len) ||
 			ct_len != FRAM_AVAILABLE + 16) {
 		crypt_key_release(&new_key_id);
-		return false;
+		{ memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 	}
 
 	memcpy(meta.salt, new_salt, 16);
@@ -906,7 +906,7 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++) {
 		if (!storage_write_raw(fram, i, (char)crypt_scratch[i])) {
 			crypt_key_release(&new_key_id);
-			return false;
+			{ memset(plain_scratch, 0, sizeof(plain_scratch)); return false; }
 		}
 	}
 
