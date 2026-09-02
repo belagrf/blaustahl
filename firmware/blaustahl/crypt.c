@@ -14,6 +14,7 @@
  */
 
 #include <string.h>
+#include "blaustahl.h"
 
 #include <mbedtls/pkcs5.h>
 #include <mbedtls/md.h>
@@ -67,6 +68,7 @@ int crypt_kdf(const char *password, const uint8_t *salt, uint8_t *key_out) {
 
 int crypt_kdf_pbkdf2(const char *password, const uint8_t *salt,
 		uint32_t iters, uint8_t *key_out) {
+	core1_phase = PH_KDF;
 
 	if (!password || !password[0] || iters == 0) return 0;
 
@@ -97,6 +99,7 @@ int crypt_kdf_pbkdf2(const char *password, const uint8_t *salt,
 int crypt_encrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 		const uint8_t *pt, size_t pt_size,
 		uint8_t *ct, size_t ct_size, size_t *ct_len) {
+	core1_phase = PH_CRYPT;
 
 	psa_status_t status = psa_aead_encrypt(key,
 		PSA_ALG_CHACHA20_POLY1305,
@@ -112,6 +115,7 @@ int crypt_encrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 int crypt_decrypt(psa_key_id_t key, const uint8_t *nonce, const uint8_t *aad,
 		const uint8_t *ct, size_t ct_size,
 		uint8_t *pt, size_t pt_size, size_t *pt_len) {
+	core1_phase = PH_CRYPT;
 
 	psa_status_t status = psa_aead_decrypt(key,
 		PSA_ALG_CHACHA20_POLY1305,

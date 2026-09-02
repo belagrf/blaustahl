@@ -37,6 +37,14 @@ bool cdc_putchar_reliable(const char ch);
 void blaustahl_led(uint16_t intensity);
 void blaustahl_dfu(void);
 
+// core1 liveness instrumentation, read by core0 on a 4800-baud touch
+enum core1_phase {
+	PH_IDLE = 0, PH_KDF, PH_CRYPT, PH_JOURNAL, PH_FLASH,
+	PH_XMODEM, PH_MS_EVAL, PH_TE,
+};
+extern volatile uint32_t core1_heartbeat;
+extern volatile uint8_t core1_phase;
+
 // USB VENDOR CLASS COMMANDS
 
 #define BS_CMD_NOP			0x00

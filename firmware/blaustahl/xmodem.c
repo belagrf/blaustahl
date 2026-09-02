@@ -74,6 +74,7 @@ static void flush_input(void) {
 }
 
 xmodem_result_t xmodem_receive_to_flash_file(const char *filename) {
+	core1_phase = PH_XMODEM;
 
 	// ensure flash is mounted before starting -- fails fast here if
 	// flash is genuinely broken, rather than after a full transfer
@@ -212,6 +213,7 @@ cleanup:
 }
 
 xmodem_result_t xmodem_send(file_ref_t f) {
+	core1_phase = PH_XMODEM;
 
 	// ensure flash is mounted before starting, same reasoning as
 	// receive: fail fast rather than after the handshake succeeds.

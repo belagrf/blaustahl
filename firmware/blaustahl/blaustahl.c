@@ -9,6 +9,7 @@
  */
 
 #include <stdio.h>
+#include <malloc.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <strings.h>
@@ -144,11 +145,37 @@ int main(void) {
 
 }
 
+volatile uint32_t core1_heartbeat = 0;
+volatile uint8_t core1_phase = PH_IDLE;
+
+extern uint32_t __scratch_x_end__;
+extern uint32_t __StackOneBottom;
+#define STACK_PAINT 0xa5a5a5a5u
+
+// paint the whole free part of SCRATCH_X below the current stack
+// pointer so the dump can report how deep core1's stack ever went,
+// including past the 2KB reservation (__StackOneBottom)
+static void core1_paint_stack(void) {
+	uint32_t sp;
+	__asm volatile ("mov %0, sp" : "=r" (sp));
+	for (uint32_t *p = &__scratch_x_end__; (uint32_t)p < sp - 64; p++)
+		*p = STACK_PAINT;
+}
+
+static uint32_t core1_stack_low_water(void) {
+	for (uint32_t *p = &__scratch_x_end__; (uint32_t)p < 0x20041000u; p++)
+		if (*p != STACK_PAINT) return (uint32_t)p;
+	return 0x20041000u;
+}
+
 void core1_main(void) {
 
+	core1_paint_stack();
 	sleep_ms(10);
 
 	while (true) {
+		core1_heartbeat++;
+		core1_phase = PH_IDLE;
 		if (!init_done && tud_cdc_connected()) {
 			init_done = true;
 			editor_init();
@@ -228,6 +255,26 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding) {
 	(void)itf;
 	if (coding->bit_rate == 1200) reset_usb_boot(0, 0);
 	if (coding->bit_rate == 2400) watchdog_reboot(0, 0, 100);
+	if (coding->bit_rate == 4800) {
+		// diagnostic dump, produced entirely on core0 inside tud_task
+		// context so it works whatever state core1 is in
+		uint32_t hb0 = core1_heartbeat;
+		sleep_ms(300);
+		uint32_t hb1 = core1_heartbeat;
+		struct mallinfo mi = mallinfo();
+		char line[200];
+		snprintf(line, sizeof(line),
+			"\r\nDIAG hb=%lu dhb=%lu phase=%u rxavail=%lu txavail=%lu "
+			"heap_used=%u heap_free=%u stack1_low=0x%08lx stack1_bottom=0x%08lx\r\n",
+			(unsigned long)hb1, (unsigned long)(hb1 - hb0), core1_phase,
+			(unsigned long)tud_cdc_available(),
+			(unsigned long)tud_cdc_write_available(),
+			mi.uordblks, mi.fordblks,
+			(unsigned long)core1_stack_low_water(),
+			(unsigned long)(uint32_t)&__StackOneBottom);
+		tud_cdc_write_str(line);
+		tud_cdc_write_flush();
+	}
 }
 
 // control LED

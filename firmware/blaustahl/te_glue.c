@@ -28,6 +28,7 @@ uint32_t te_glue_max_file_size(void) {
 }
 
 te_glue_result_t te_glue_edit(const char *filename) {
+	core1_phase = PH_TE;
 
 	storage_init();	// ensure flash is mounted -- same lazy-init path
 						// every other flash-touching action uses

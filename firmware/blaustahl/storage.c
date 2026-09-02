@@ -286,6 +286,7 @@ static uint32_t journal_crc32(const uint8_t *data, uint32_t len) {
 // replayed after a tear. Best-effort by design: returns false if
 // flash isn't cooperating, and the caller proceeds unjournaled.
 static bool journal_write(const ltsf_meta_t *m, const uint8_t *img) {
+	core1_phase = PH_JOURNAL;
 
 	ensure_storage_ready();
 
@@ -318,6 +319,7 @@ static void journal_delete(void) {
 // it into FRAM (data first, then metadata -- same order as a normal
 // commit) and delete it. Returns true if a recovery was performed.
 static bool journal_recover(void) {
+	core1_phase = PH_JOURNAL;
 
 	ensure_storage_ready();
 
