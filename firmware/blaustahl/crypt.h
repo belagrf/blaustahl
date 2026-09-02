@@ -17,6 +17,17 @@
 
 int crypt_init(psa_key_id_t *key, const uint8_t *key_bytes);
 
+// hands a key slot back and clears the caller's handle. mbedtls 2.28
+// has a fixed table of 32 volatile key slots and frees one only on an
+// explicit psa_destroy_key(), so EVERY crypt_init() needs a matching
+// release -- on the failure paths just as much as the success ones.
+// Verifying a password imports a key and then decrypts to check the
+// AEAD tag, so without this a wrong guess burns a slot: the 33rd
+// import fails with PSA_ERROR_INSUFFICIENT_MEMORY and the correct
+// passphrase reports "INCORRECT PASSWORD." until a power cycle. Safe
+// on an already-zero handle.
+void crypt_key_release(psa_key_id_t *key);
+
 // generic SHA-256, used by storage.c to mix multiple inputs (RNG
 // output, the board's unique ID, a timestamp) into a well-diffused
 // salt rather than relying on get_rand_32() alone. See the discussion

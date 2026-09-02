@@ -470,6 +470,17 @@ static write_buffer_t *buffer_for_kind(storage_kind_t kind) {
 #define CRYPT_SCRATCH_SIZE (FRAM_AVAILABLE + 16)
 static uint8_t crypt_scratch[CRYPT_SCRATCH_SIZE];
 
+// the other side of the same staging: decrypt output / encrypt input,
+// plus the raw copy storage_snapshot_fram() hands to flash. Static for
+// crypt_scratch's reason above, and ONE buffer for all of it because
+// enable, unlock, rekey, disable and snapshot are each driven to
+// completion from core1's single-threaded CLI and never overlap. The
+// closest they come is storage_crypt_unlock(), which zeroes this
+// buffer before handing off to crypt_rekey_to_pbkdf2() for the legacy
+// auto-upgrade: sequential reuse, not a live overlap. One buffer
+// instead of five costs 7680 bytes of .bss rather than 38400.
+static uint8_t plain_scratch[FRAM_AVAILABLE];
+
 static const uint8_t crypt_aad[4] = { 0x00, 0x00, 0x00, 0x01 };
 
 // ---- raw (unbuffered) access -- the only functions that ever touch
@@ -546,6 +557,14 @@ bool storage_write(file_ref_t f, uint32_t offset, char c) {
 		b->dirty = true;
 		return true;
 	}
+
+	// storage_can_write() already refuses CRYPT_LOCKED, so what this
+	// catches is UNLOCKED-with-no-buffer, i.e. a storage_buffer_enter()
+	// that failed upstream. One raw byte there lands on ciphertext and
+	// corrupts the whole image, and the AEAD tag only reveals it at the
+	// next unlock.
+	if (f.kind == STORAGE_FRAM && storage_crypt_status() != CRYPT_PLAINTEXT)
+		return false;
 
 	return storage_write_raw(f, offset, c);
 
@@ -672,15 +691,16 @@ bool storage_buffer_exit(void) {
 
 bool storage_select(file_ref_t f) {
 
-	// each storage kind keeps its own independent buffer, so
-	// switching between FRAM and SRAM never discards anything --
-	// unlike the old single shared buffer, there's no longer anything
-	// here that can fail. Still returns bool: a stable signature for
-	// callers, in case a future failure mode is ever added.
+	// each storage kind keeps its own independent buffer, so switching
+	// between FRAM and SRAM never discards anything and the selection
+	// itself cannot fail. The buffer entry below can: it decrypts the
+	// whole FRAM image, and unlocked FRAM without a live buffer is
+	// neither readable nor writable. Return that, so a caller who cares
+	// can tell.
 	current_file = f;
 
 	if (f.kind == STORAGE_FRAM && storage_crypt_status() == CRYPT_UNLOCKED)
-		storage_buffer_enter();	// no-op if FRAM's buffer is already active
+		return storage_buffer_enter();	// no-op if FRAM's buffer is already active
 
 	return true;
 
@@ -742,26 +762,33 @@ bool storage_crypt_enable(const char *password) {
 		return false;
 
 	psa_key_id_t new_key_id;
-	if (!crypt_init(&new_key_id, derived_key)) return false;
+	bool imported = crypt_init(&new_key_id, derived_key);
+	memset(derived_key, 0, sizeof(derived_key));
+	if (!imported) return false;
 
 	file_ref_t fram = storage_fram_ref();
-	static uint8_t plaintext[FRAM_AVAILABLE];
-	uint32_t got = storage_read_raw(fram, 0, (char *)plaintext, FRAM_AVAILABLE);
-	if (got != FRAM_AVAILABLE) return false;
+	uint32_t got = storage_read_raw(fram, 0, (char *)plain_scratch, FRAM_AVAILABLE);
+	if (got != FRAM_AVAILABLE) {
+		crypt_key_release(&new_key_id);
+		return false;
+	}
 
 	uint8_t new_nonce[12];
 	memset(new_nonce, 0, 12);
 
 	size_t ct_len = 0;
 	if (!crypt_encrypt(new_key_id, new_nonce, crypt_aad,
-			plaintext, FRAM_AVAILABLE,
-			crypt_scratch, sizeof(crypt_scratch), &ct_len))
+			plain_scratch, FRAM_AVAILABLE,
+			crypt_scratch, sizeof(crypt_scratch), &ct_len) ||
+			ct_len != FRAM_AVAILABLE + 16) {
+		crypt_key_release(&new_key_id);
 		return false;
-	if (ct_len != FRAM_AVAILABLE + 16) return false;
+	}
 
-	memset(plaintext, 0, sizeof(plaintext));	// done with it -- don't
-												// leave a plaintext copy
-												// parked in RAM
+	memset(plain_scratch, 0, sizeof(plain_scratch));	// done with it --
+														// don't leave a
+														// plaintext copy
+														// parked in RAM
 
 	memcpy(meta.salt, new_salt, 16);
 	memcpy(meta.nonce, new_nonce, 12);
@@ -777,12 +804,18 @@ bool storage_crypt_enable(const char *password) {
 	// the transition recovers to the fully-encrypted state
 	journal_write(&meta, crypt_scratch);
 
-	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++)
-		if (!storage_write_raw(fram, i, (char)crypt_scratch[i])) return false;
+	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++) {
+		if (!storage_write_raw(fram, i, (char)crypt_scratch[i])) {
+			crypt_key_release(&new_key_id);
+			return false;
+		}
+	}
 
 	ltsf_save_meta(&meta);
 	journal_delete();
 
+	crypt_key_release(&key_id);		// zero in practice (FRAM was
+									// plaintext), routed for uniformity
 	key_id = new_key_id;
 	crypt_valid = true;
 
@@ -820,11 +853,10 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 	if (got != FRAM_AVAILABLE) return false;
 	memcpy(&crypt_scratch[FRAM_AVAILABLE], meta.tag, 16);
 
-	static uint8_t plaintext[FRAM_AVAILABLE];
 	size_t pt_len = 0;
 	if (!crypt_decrypt(key_id, meta.nonce, crypt_aad,
 			crypt_scratch, FRAM_AVAILABLE + 16,
-			plaintext, FRAM_AVAILABLE, &pt_len))
+			plain_scratch, FRAM_AVAILABLE, &pt_len))
 		return false;
 	if (pt_len != FRAM_AVAILABLE) return false;
 
@@ -839,7 +871,9 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 		return false;
 
 	psa_key_id_t new_key_id;
-	if (!crypt_init(&new_key_id, derived_key)) return false;
+	bool imported = crypt_init(&new_key_id, derived_key);
+	memset(derived_key, 0, sizeof(derived_key));
+	if (!imported) return false;
 
 	uint8_t new_nonce[12];
 	memset(new_nonce, 0, 12);
@@ -849,10 +883,12 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 	// plaintext form
 	size_t ct_len = 0;
 	if (!crypt_encrypt(new_key_id, new_nonce, crypt_aad,
-			plaintext, FRAM_AVAILABLE,
-			crypt_scratch, sizeof(crypt_scratch), &ct_len))
+			plain_scratch, FRAM_AVAILABLE,
+			crypt_scratch, sizeof(crypt_scratch), &ct_len) ||
+			ct_len != FRAM_AVAILABLE + 16) {
+		crypt_key_release(&new_key_id);
 		return false;
-	if (ct_len != FRAM_AVAILABLE + 16) return false;
+	}
 
 	memcpy(meta.salt, new_salt, 16);
 	memcpy(meta.nonce, new_nonce, 12);
@@ -867,12 +903,18 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 	// tear mid-rewrite recovers to the new-key state at next boot
 	journal_write(&meta, crypt_scratch);
 
-	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++)
-		if (!storage_write_raw(fram, i, (char)crypt_scratch[i])) return false;
+	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++) {
+		if (!storage_write_raw(fram, i, (char)crypt_scratch[i])) {
+			crypt_key_release(&new_key_id);
+			return false;
+		}
+	}
 
 	ltsf_save_meta(&meta);
 	journal_delete();
 
+	crypt_key_release(&key_id);		// the old session key -- its slot is
+									// never coming back on its own
 	key_id = new_key_id;
 	// crypt_valid stays true -- still unlocked, just re-keyed
 
@@ -882,11 +924,11 @@ static bool crypt_rekey_to_pbkdf2(const char *new_password) {
 	// selected) if it was active, so nothing stale lingers
 	if (fram_buffer.active) {
 		fram_buffer.len = FRAM_AVAILABLE;
-		memcpy(fram_buffer.data, plaintext, FRAM_AVAILABLE);
+		memcpy(fram_buffer.data, plain_scratch, FRAM_AVAILABLE);
 		fram_buffer.dirty = false;
 	}
 
-	memset(plaintext, 0, sizeof(plaintext));
+	memset(plain_scratch, 0, sizeof(plain_scratch));
 
 	return true;
 
@@ -917,28 +959,38 @@ bool storage_crypt_unlock(const char *password) {
 	}
 
 	psa_key_id_t new_key_id;
-	if (!crypt_init(&new_key_id, derived_key)) return false;
+	bool imported = crypt_init(&new_key_id, derived_key);
+	memset(derived_key, 0, sizeof(derived_key));
+	if (!imported) return false;
 
 	// verify the password by attempting a real decrypt (AEAD tag
 	// check) -- this is the ONLY password verification mechanism;
-	// there is no separate stored password hash
+	// there is no separate stored password hash. It also means a wrong
+	// password is an ordinary outcome here, not an exceptional one, so
+	// every exit below hands its key slot back (see crypt_key_release).
 	file_ref_t fram = storage_fram_ref();
 	uint32_t got = storage_read_raw(fram, 0, (char *)crypt_scratch, FRAM_AVAILABLE);
-	if (got != FRAM_AVAILABLE) return false;
+	if (got != FRAM_AVAILABLE) {
+		crypt_key_release(&new_key_id);
+		return false;
+	}
 	memcpy(&crypt_scratch[FRAM_AVAILABLE], meta.tag, 16);
 
-	static uint8_t scratch_pt[FRAM_AVAILABLE];
 	size_t pt_len = 0;
 	if (!crypt_decrypt(new_key_id, meta.nonce, crypt_aad,
 			crypt_scratch, FRAM_AVAILABLE + 16,
-			scratch_pt, FRAM_AVAILABLE, &pt_len))
+			plain_scratch, FRAM_AVAILABLE, &pt_len) ||
+			pt_len != FRAM_AVAILABLE) {
+		crypt_key_release(&new_key_id);
 		return false;
-	if (pt_len != FRAM_AVAILABLE) return false;
+	}
 
-	memset(scratch_pt, 0, sizeof(scratch_pt));	// verification copy --
-												// not needed past this
-												// point, don't keep it
+	memset(plain_scratch, 0, sizeof(plain_scratch));	// verification copy --
+														// don't keep it, and
+														// the rekey below
+														// reuses this buffer
 
+	crypt_key_release(&key_id);
 	key_id = new_key_id;
 	crypt_valid = true;
 
@@ -966,17 +1018,18 @@ bool storage_crypt_change_password(const char *new_password) {
 
 }
 
-// drop the session key and every RAM copy of FRAM plaintext, leaving
-// encrypted FRAM locked again -- what unplugging achieves, without
-// unplugging. Refuses with a dirty buffer (commit or discard first)
-// rather than silently throwing away staged edits.
+// drop the session key and the FRAM plaintext this file holds (the
+// FRAM write buffer), leaving encrypted FRAM locked again -- what
+// unplugging achieves, without unplugging. Refuses with a dirty buffer
+// (commit or discard first) rather than silently throwing away staged
+// edits. Plaintext copies OUTSIDE storage.c are their owners' to clear:
+// cli.c's `lock` command clears the editor's copy buffer alongside this.
 bool storage_crypt_lock(void) {
 
 	if (storage_crypt_status() != CRYPT_UNLOCKED) return false;
 	if (fram_buffer.active && fram_buffer.dirty) return false;
 
-	psa_destroy_key(key_id);
-	key_id = 0;
+	crypt_key_release(&key_id);
 	crypt_valid = false;
 
 	memset(fram_buffer.data, 0, sizeof(fram_buffer.data));
@@ -1011,11 +1064,10 @@ bool storage_crypt_disable(void) {
 
 	memcpy(&crypt_scratch[FRAM_AVAILABLE], meta.tag, 16);
 
-	static uint8_t plaintext[FRAM_AVAILABLE];
 	size_t pt_len = 0;
 	if (!crypt_decrypt(key_id, meta.nonce, crypt_aad,
 			crypt_scratch, FRAM_AVAILABLE + 16,
-			plaintext, FRAM_AVAILABLE, &pt_len)) {
+			plain_scratch, FRAM_AVAILABLE, &pt_len)) {
 		journal_delete();
 		return false;
 	}
@@ -1025,7 +1077,7 @@ bool storage_crypt_disable(void) {
 	}
 
 	for (uint32_t i = 0; i < FRAM_AVAILABLE; i++)
-		if (!storage_write_raw(fram, i, (char)plaintext[i])) return false;
+		if (!storage_write_raw(fram, i, (char)plain_scratch[i])) return false;
 
 	meta.algo = LTSF_ALGO_PLAINTEXT;
 	meta.kdf_iters = 0;
@@ -1033,6 +1085,8 @@ bool storage_crypt_disable(void) {
 	ltsf_save_meta(&meta);
 	journal_delete();
 
+	crypt_key_release(&key_id);		// FRAM is plaintext now; nothing will
+									// ever decrypt with this key again
 	crypt_valid = false;
 
 	// refresh FRAM's buffer specifically (not "whatever
@@ -1041,11 +1095,11 @@ bool storage_crypt_disable(void) {
 	// if it was active
 	if (fram_buffer.active) {
 		fram_buffer.len = FRAM_AVAILABLE;
-		memcpy(fram_buffer.data, plaintext, FRAM_AVAILABLE);
+		memcpy(fram_buffer.data, plain_scratch, FRAM_AVAILABLE);
 		fram_buffer.dirty = false;
 	}
 
-	memset(plaintext, 0, sizeof(plaintext));
+	memset(plain_scratch, 0, sizeof(plain_scratch));
 
 	return true;
 
@@ -1060,14 +1114,16 @@ bool storage_snapshot_fram(void) {
 	// is ciphertext if FRAM is encrypted. This never decrypts for a
 	// snapshot, on purpose: flash is unencrypted storage, so leaking
 	// plaintext there would defeat the point of encrypting FRAM at all.
-	static char buf[FRAM_AVAILABLE];
-
+	// Sharing plain_scratch is safe for that invariant precisely
+	// because the read below fills all FRAM_AVAILABLE bytes or bails --
+	// no residue from an earlier decrypt can reach the file.
 	file_ref_t fram = storage_fram_ref();
-	uint32_t got = storage_read_raw(fram, 0, buf, FRAM_AVAILABLE);
+	uint32_t got = storage_read_raw(fram, 0, (char *)plain_scratch, FRAM_AVAILABLE);
 	if (got != FRAM_AVAILABLE) return false;
 
 	ensure_storage_ready();
-	return flash_storage_write_file("fram_snapshot.bin", buf, FRAM_AVAILABLE);
+	return flash_storage_write_file("fram_snapshot.bin",
+		(const char *)plain_scratch, FRAM_AVAILABLE);
 
 }
 

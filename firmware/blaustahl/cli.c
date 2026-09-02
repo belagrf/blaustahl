@@ -363,6 +363,9 @@ static bool cli_dispatch(const char *cmd, const char *arg1, const char *arg2) {
 		} else if (st == CRYPT_LOCKED) {
 			printf("ALREADY LOCKED.");
 		} else if (storage_crypt_lock()) {
+			// the copy buffer can hold plaintext lifted out of decrypted
+			// FRAM; storage_crypt_lock() clears only its own copies
+			editor_copy_buffer_clear();
 			printf("LOCKED. (password COMMAND UNLOCKS.)");
 			try_jump_to_fram();
 		} else {
