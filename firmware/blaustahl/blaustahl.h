@@ -26,13 +26,19 @@
 int cdc_getchar(void);
 void cdc_putchar(const char ch);
 
-// like cdc_putchar() but waits (bounded) for CDC TX FIFO space
-// instead of silently dropping when it's full -- required for any
+// like cdc_putchar() but waits (bounded) for space in the outbound
+// ring instead of silently dropping when it's full -- required for any
 // multi-byte payload whose framing can't survive a lost byte (XMODEM
 // blocks, SRWP replies). Previously defined in blaustahl.c but never
 // declared anywhere, so xmodem.c was calling it through an implicit
 // declaration. Returns false if the host stopped reading.
 bool cdc_putchar_reliable(const char ch);
+
+// cdc_putchar_reliable() over a whole buffer, with the same per-byte
+// bound and the same false-on-host-stopped-reading result. Every file
+// but blaustahl.c sends bulk data this way, because core0 owns the USB
+// device stack and nothing else may call tud_cdc_write*().
+bool cdc_write_reliable(const uint8_t *buf, uint32_t len);
 
 void blaustahl_led(uint16_t intensity);
 void blaustahl_dfu(void);

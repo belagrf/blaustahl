@@ -22,6 +22,8 @@
 #include "pico/binary_info.h"
 #include "pico/multicore.h"
 #include "pico/bootrom.h"
+#include "pico/util/queue.h"
+#include "pico/stdio/driver.h"
 
 #include "hardware/pwm.h"
 #include "hardware/pll.h"
@@ -39,6 +41,85 @@ void core1_main(void);
 
 void init_blaustahl(void);
 bool init_done = false;
+
+// TinyUSB is built with CFG_TUSB_OS=OPT_OS_NONE, so its endpoint claim
+// state is not atomic and the device stack has to run on exactly one
+// core. core0 owns it. Everything core1 (which runs the whole
+// application) sends or receives crosses over through these two byte
+// rings, filled and drained by cdc_pump() in core0's loop. When core1
+// called tud_cdc_* directly, the two cores could interleave inside a
+// claim and leave the CDC OUT endpoint never re-armed. The device then
+// stayed enumerated but stopped accepting host bytes entirely.
+// Reproduced on hardware.
+#define CDC_RX_RING 1024
+#define CDC_TX_RING 2048
+
+static queue_t rx_q;
+static queue_t tx_q;
+static volatile bool cdc_connected = false;
+
+static void cdc_pump(void) {
+
+	cdc_connected = tud_cdc_connected();
+
+	uint8_t buf[64];
+
+	for (;;) {
+		// a full rx ring leaves the remaining bytes sitting in the CDC
+		// RX FIFO rather than dropping them, so the host still gets the
+		// same USB backpressure it got when core1 read that FIFO itself
+		uint32_t room = CDC_RX_RING - queue_get_level(&rx_q);
+		if (!room || !tud_cdc_available()) break;
+		if (room > sizeof(buf)) room = sizeof(buf);
+		uint32_t n = tud_cdc_read(buf, room);
+		if (!n) break;
+		for (uint32_t i = 0; i < n; i++) queue_try_add(&rx_q, &buf[i]);
+	}
+
+	bool wrote = false;
+	uint8_t ch;
+
+	while (tud_cdc_write_available() && queue_try_remove(&tx_q, &ch)) {
+		tud_cdc_write_char((char)ch);
+		wrote = true;
+	}
+
+	if (wrote) tud_cdc_write_flush();
+
+}
+
+// printf() on core1 used to reach the host through pico_stdio_usb,
+// whose out_chars() calls tud_task() itself. That was the second way
+// the device stack ended up running on both cores at once, so this
+// driver replaces it; it only touches the tx ring. Output is dropped
+// once the deadline passes instead of waiting indefinitely, so a
+// printf can never wedge core1 when the host stops reading.
+#define STDIO_TX_TIMEOUT_MS 500
+
+static void cdc_stdio_out_chars(const char *buf, int len) {
+
+	if (!cdc_connected) return;
+
+	absolute_time_t deadline = make_timeout_time_ms(STDIO_TX_TIMEOUT_MS);
+
+	for (int i = 0; i < len; i++) {
+		uint8_t ch = (uint8_t)buf[i];
+		while (!queue_try_add(&tx_q, &ch)) {
+			if (!cdc_connected || time_reached(deadline)) return;
+		}
+	}
+
+}
+
+static stdio_driver_t cdc_stdio_driver = {
+	.out_chars = cdc_stdio_out_chars,
+#if PICO_STDIO_ENABLE_CRLF_SUPPORT
+	// pico_stdio_usb defaulted PICO_STDIO_USB_DEFAULT_CRLF to
+	// PICO_STDIO_DEFAULT_CRLF, so the same value keeps printf output
+	// byte-identical to before
+	.crlf_enabled = PICO_STDIO_DEFAULT_CRLF,
+#endif
+};
 
 #ifndef CDCONLY
 void blaustahl_task(void);
@@ -110,8 +191,13 @@ int main(void) {
 	// init tinyusb
 	tud_init(BOARD_TUD_RHPORT);
 
+	// must precede the first printf() and the core1 launch below, both
+	// of which reach these rings
+	queue_init(&rx_q, 1, CDC_RX_RING);
+	queue_init(&tx_q, 1, CDC_TX_RING);
+
 	// init stdio
-	stdio_usb_init();
+	stdio_set_driver_enabled(&cdc_stdio_driver, true);
 
 	// init hardware
 	init_blaustahl();
@@ -135,6 +221,7 @@ int main(void) {
 
 		tight_loop_contents();
 		tud_task();
+		cdc_pump();
 #ifndef CDCONLY
 		blaustahl_task();
 #endif
@@ -176,7 +263,7 @@ void core1_main(void) {
 	while (true) {
 		core1_heartbeat++;
 		core1_phase = PH_IDLE;
-		if (!init_done && tud_cdc_connected()) {
+		if (!init_done && cdc_connected) {
 			init_done = true;
 			editor_init();
 		} else {
@@ -187,26 +274,18 @@ void core1_main(void) {
 }
 
 int cdc_getchar(void) {
-	uint8_t buf[1];
-	if (tud_cdc_connected() && tud_cdc_available()) {
-		uint32_t count = tud_cdc_read(buf, 1);
-		if (count)
-			return((int)buf[0]);
-		else
-			return(EOF);
-	} else {
-		return(EOF);
-	}
+	uint8_t ch;
+	if (queue_try_remove(&rx_q, &ch)) return((int)ch);
+	return(EOF);
 }
 
 void cdc_putchar(const char ch) {
-	if (tud_cdc_connected() && tud_cdc_write_available()) {
-		tud_cdc_write_char(ch);
-		tud_cdc_write_flush();
-	}
+	uint8_t b = (uint8_t)ch;
+	if (cdc_connected)
+		queue_try_add(&tx_q, &b);
 }
 
-// like cdc_putchar(), but waits (briefly, bounded) for FIFO space
+// like cdc_putchar(), but waits (briefly, bounded) for ring space
 // instead of silently dropping the byte if none is available right
 // now. cdc_putchar()'s drop-on-full behavior is exactly right for
 // echoing single keystrokes -- losing one occasionally is harmless,
@@ -215,24 +294,36 @@ void cdc_putchar(const char ch) {
 // tight loop with no pauses (XMODEM's block transmission is the one
 // place in this firmware that does that -- 133 bytes per block, no
 // delay between them) can genuinely outrun the host's USB polling
-// and fill that same FIFO mid-write; a single dropped byte there
+// and fill the buffer mid-write; a single dropped byte there
 // corrupts that block's framing entirely, which running was the
 // actual cause of transfers that silently never completed. Returns
 // false (rather than hanging indefinitely) if the host stops reading
 // altogether -- e.g. disconnected mid-transfer -- so the caller can
-// abort cleanly instead of blocking forever.
+// abort cleanly instead of blocking forever. The disconnect is
+// re-checked inside the wait, not just on entry, because once the host
+// is gone the ring stops draining entirely and an entry-only check
+// would burn the full timeout on every remaining byte of the transfer.
 bool cdc_putchar_reliable(const char ch) {
 
-	if (!tud_cdc_connected()) return false;
+	if (!cdc_connected) return false;
 
+	uint8_t b = (uint8_t)ch;
 	absolute_time_t deadline = make_timeout_time_ms(1000);
 
-	while (!tud_cdc_write_available()) {
+	while (!queue_try_add(&tx_q, &b)) {
+		if (!cdc_connected) return false;
 		if (time_reached(deadline)) return false;
 	}
 
-	tud_cdc_write_char(ch);
-	tud_cdc_write_flush();
+	return true;
+
+}
+
+bool cdc_write_reliable(const uint8_t *buf, uint32_t len) {
+
+	for (uint32_t i = 0; i < len; i++)
+		if (!cdc_putchar_reliable((char)buf[i])) return false;
+
 	return true;
 
 }
@@ -262,13 +353,16 @@ void tud_cdc_line_coding_cb(uint8_t itf, cdc_line_coding_t const *coding) {
 		sleep_ms(300);
 		uint32_t hb1 = core1_heartbeat;
 		struct mallinfo mi = mallinfo();
-		char line[200];
+		char line[256];
 		snprintf(line, sizeof(line),
 			"\r\nDIAG hb=%lu dhb=%lu phase=%u rxavail=%lu txavail=%lu "
+			"rxq=%lu/%u txq=%lu/%u "
 			"heap_used=%u heap_free=%u stack1_low=0x%08lx stack1_bottom=0x%08lx\r\n",
 			(unsigned long)hb1, (unsigned long)(hb1 - hb0), core1_phase,
 			(unsigned long)tud_cdc_available(),
 			(unsigned long)tud_cdc_write_available(),
+			(unsigned long)queue_get_level(&rx_q), CDC_RX_RING,
+			(unsigned long)queue_get_level(&tx_q), CDC_TX_RING,
 			mi.uordblks, mi.fordblks,
 			(unsigned long)core1_stack_low_water(),
 			(unsigned long)(uint32_t)&__StackOneBottom);

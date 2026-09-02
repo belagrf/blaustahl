@@ -212,9 +212,15 @@ add_compile_definitions(PICO_FLASH_ASSERT_ON_UNSAFE=0)
 
 pico_sdk_init()
 
-pico_enable_stdio_usb(blaustahl 1)
+# stdout does NOT go through pico_stdio_usb any more. Its out_chars()
+# calls tud_task() on whichever core happens to printf(), and the
+# application runs on core1 while core0 owns the USB device stack.
+# blaustahl.c registers its own stdio driver instead, feeding core0's
+# outbound ring and never touching TinyUSB. See the cdc_pump() comment
+# there for why the device stack has to stay on one core.
+pico_enable_stdio_usb(blaustahl 0)
 pico_enable_stdio_uart(blaustahl 0)
-pico_enable_stdio_usb(blaustahl_cdconly 1)
+pico_enable_stdio_usb(blaustahl_cdconly 0)
 pico_enable_stdio_uart(blaustahl_cdconly 0)
 
 target_compile_definitions(blaustahl PUBLIC
@@ -234,8 +240,8 @@ target_compile_definitions(blaustahl_cdconly PUBLIC
 	MBEDTLS_CONFIG_FILE="mbedtls_config.h"
 	)
 
-target_link_libraries(blaustahl PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore pico_stdio_usb hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
-target_link_libraries(blaustahl_cdconly PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore pico_stdio_usb hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
+target_link_libraries(blaustahl PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
+target_link_libraries(blaustahl_cdconly PRIVATE pico_stdlib hardware_resets hardware_uart hardware_irq hardware_spi hardware_pwm pico_multicore hardware_dma hardware_flash pico_flash pico_mbedtls pico_rand pico_unique_id hardware_watchdog tinyusb_device)
 
 pico_add_extra_outputs(blaustahl)
 pico_add_extra_outputs(blaustahl_cdconly)

@@ -80,7 +80,6 @@
 #include <stdbool.h>
 
 #include "pico/time.h"
-#include "tusb.h"
 
 #include "blaustahl.h"
 #include "editor.h"
@@ -163,41 +162,15 @@ static bool srwp_read_u32(uint32_t *out) {
 
 }
 
-// waits (bounded) for TX FIFO space before every byte rather than
-// silently dropping. The previous tud_cdc_write_char() loop dropped
-// bytes the moment the 64-byte full-speed CDC TX FIFO filled -- so
-// any CMD_READ longer than ~64 bytes truncated its reply mid-stream,
-// desyncing the host. (Measured on real hardware: an 8KB read
-// returned ~130 bytes.) This is the exact failure mode blaustahl.c's
-// cdc_putchar_reliable() comment describes for XMODEM blocks; SRWP
-// replies have the same can't-lose-a-byte framing. Not literally
-// cdc_putchar_reliable() though: that flushes after every byte
-// (fine for XMODEM's 133-byte bursts), which for an 8KB reply would
-// mean thousands of 1-byte USB transfers. Here the flush happens
-// when the FIFO fills and once at the end, so replies move in full
-// 64-byte packets. Returns false if the host stopped reading --
+// replies must never drop a byte. An earlier version wrote straight
+// into the CDC TX FIFO and lost everything past its 64 bytes, so any
+// CMD_READ longer than that truncated mid-stream and desynced the host
+// (measured on real hardware: an 8KB read returned ~130 bytes). Same
+// failure mode blaustahl.c's cdc_putchar_reliable() comment describes
+// for XMODEM blocks. Returns false if the host stopped reading, and
 // callers abort the command cleanly.
 static bool srwp_write_bytes(const uint8_t *buf, uint32_t len) {
-
-	if (!tud_cdc_connected()) return false;
-
-	for (uint32_t i = 0; i < len; i++) {
-
-		absolute_time_t deadline = make_timeout_time_ms(1000);
-
-		while (!tud_cdc_write_available()) {
-			tud_cdc_write_flush();	// kick the queued bytes out --
-									// core0's tud_task() drains them
-			if (time_reached(deadline)) return false;
-		}
-
-		tud_cdc_write_char(buf[i]);
-
-	}
-
-	tud_cdc_write_flush();
-	return true;
-
+	return cdc_write_reliable(buf, len);
 }
 
 static bool srwp_write_u32(uint32_t v) {
